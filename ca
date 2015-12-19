@@ -41,6 +41,7 @@
 
 path=$(cd `dirname $0` && pwd)
 data=$path/data
+include=$path/include
 root=$data/root
 organisation=''
 
@@ -201,7 +202,7 @@ function setup_ca {
     
     echo 
     echo "Generating template configuration file."
-    cat "$path/template_dist.conf" | \
+    cat "$include/template_dist.conf" | \
         sed "s|===COUNTRY===|$country|" | \
         sed "s|===PROVINCE===|$province|" | \
         sed "s|===LOCALITY===|$locality|" | \
