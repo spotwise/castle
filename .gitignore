@@ -1,0 +1,14 @@
+# Ignore the following files and folders
+
+# The certificate hierarcy (must be backed up some other way)
+root/
+all/
+
+# The certificate revocation list
+crl/
+
+# The configuration template
+template.conf
+
+# Any temporary files left behind
+temp_*

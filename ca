@@ -1,0 +1,681 @@
+#!/bin/bash
+#
+# This script wraps OpenSSL commands to set up and 
+# operate a private certifiate authority.
+#
+# The MIT License (MIT)
+# 
+# Copyright (c) 2009 Spotwise
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#  
+
+############# Constants and variables ###############
+
+path=$(cd `dirname $0` && pwd)
+root=$path/root
+organisation=''
+
+# Read organisation name from the configuration file. If the
+# configuration file has not yet been created, the organisation
+# name will be set as part of setting up the root certificate
+# authority.
+if [ -f "$path/template.conf" ]; then
+    organisation=`cat "$path/template.conf" | grep 0.organizationName_default | awk '{ print $3; }'`
+fi
+
+#################### Functions ######################
+
+function get_certificate_cn() {
+    cn=`openssl x509 -text -in "$1" | grep Subject: | awk -F 'CN=' '{ print $2 }' | awk -F '/' '{ print $1 }'`
+    echo $cn
+}
+
+function get_certificate_expiration() {
+    exp=`openssl x509 -text -in "$1" | grep 'Not After'`
+    echo ${exp#*:}
+}
+
+function get_certificate_status() {
+    # $1 = CA name
+    # $2 = CN name
+    caf=`echo $1 | sed "s/ /_/g"`
+    stat=`cat "$root/sub/$caf/index.txt" | grep "CN=$2" | tail -n 1`
+    echo ${stat:0:1}
+}
+
+function revoke_impl {
+    # $1 = CA name
+    # $2 = certificate filename base
+    caf=`echo $1 | sed "s/ /_/g"`
+    
+    pushd "$root/sub/$caf"
+    
+    echo "Creating temporary configuration files."
+    cat "$path/template.conf" | \
+        sed "s/===CANAME===/$1/" > "$path/temp_sub_revoke.conf"
+            
+    openssl ca -config "$path/temp_sub_revoke.conf" \
+        -cert public/ca_$caf.crt  -keyfile private/ca_$caf.key \
+        -passin pass:012345678 -revoke public/$2.crt
+        
+    # Remove files (do not remove CSR and key)
+    rm public/$2.crt
+    rm $path/all/$2*
+        
+    popd
+    rm -f "$path/temp_sub_revoke.conf"    
+}
+
+function list_all {
+
+    echo
+    echo "Listing all certificate authorities and certificates:"
+    echo
+
+    # Root CA
+    root_name=$(get_certificate_cn root/public/ca.crt)
+    root_expiration=$(get_certificate_expiration root/public/ca.crt)
+    echo $root_name [$root_expiration]
+
+    for d in $(ls root/sub 2>/dev/null); do        
+
+        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        sub_name=$(get_certificate_cn $sub_ca_crt)
+        sub_expiration=$(get_certificate_expiration $sub_ca_crt)
+        echo "  $sub_name [$sub_expiration]"
+
+        for c in $(ls -1 root/sub/$d/public/*.crt | grep -v ca_); do
+
+            c_name=$(get_certificate_cn $c)
+            c_expiration=$(get_certificate_expiration $c)
+            c_status=$(get_certificate_status $d $c_name)
+            if [ $c_status != "R" ]; then
+                echo "    $c_name [$c_expiration]"
+            fi
+        done
+
+    done
+    
+    echo
+    read -e -p "Done. Press Enter to continue..."
+}
+
+function setup_ca {
+
+    echo
+    echo "It appears that you haven't yet set up a certificate authority."
+    echo "Please press Enter to do it now or Ctrl+C to abort."
+    read e
+
+    echo "Setting up folder structure."
+    mkdir -p ./{all,crl}
+    mkdir -p root/{public,private,requests,crl}
+    chmod 700 root/private
+    touch root/index.txt
+    echo 01 > root/serial
+    
+    echo
+    echo "Please provide some details about yourself. Note that "
+    echo "all data should be entered in printable 7-bit ASCII "
+    echo "only."
+    echo
+    read -e -p "Country name (2 characters)     : " country
+    read -e -p "State or province name          : " province
+    read -e -p "Locality (city)                 : " locality
+    read -e -p "Organisation name               : " organisation
+    read -e -p "Organisational unit name        : " unit
+    read -e -p "Email address                   : " email
+    read -e -p "URL for CRL (no trailing slash) : " url
+    echo
+    
+    while true
+    do
+        echo -n "Please confirm these settings (y or n) :"
+        read CONFIRM
+        case $CONFIRM in
+            y|Y|YES|yes|Yes)
+                break ;;
+            n|N|no|NO|No)
+                echo
+                echo Aborting. Run this script again to retry.
+                echo
+                exit
+                ;;
+        esac
+    done    
+    
+    echo 
+    echo "Generating template configuration file."
+    cat "$path/template_dist.conf" | \
+        sed "s|===COUNTRY===|$country|" | \
+        sed "s|===PROVINCE===|$province|" | \
+        sed "s|===LOCALITY===|$locality|" | \
+        sed "s|===ORGANISATION===|$organisation|" | \
+        sed "s|===UNIT===|$unit|" | \
+        sed "s|===EMAIL===|$email|" | \
+        sed "s|===URL===|$url|" > "$path/template.conf"
+        
+    
+    echo "Generating root CA private key. This may take a while."
+    pushd "$root"
+    openssl genrsa -des3 -passout pass:012345678 -out private/ca.key 4096
+    
+    echo "Generating temporary root configuration file."
+    cat "$path/template.conf" | \
+        sed "s|===COMMONNAME===|$organisation root CA|" | \
+        sed "s|===CANAME===|root|" | \
+        sed "s|CA:true|critical,CA:true|"> "$path/temp_root.conf"
+                
+    echo "Generating the root CA certificate."
+    openssl req -batch -config "$path/temp_root.conf" -new -x509 -extensions v3_ca \
+        -passin pass:012345678 -days 9125 -key "$root/private/ca.key" -out "$root/public/ca.crt"
+    
+    echo "Removing temporary configuration file."
+    rm "$path/temp_root.conf"
+
+    # Copy certificate
+    cp public/ca.crt "$path/all/"
+
+    popd
+}
+
+function create_sub_ca {
+
+    echo
+    echo "Subordinate certificate authorities are signed by the root CA and "
+    echo "are used to sign certificates. You must enter the name of the "
+    echo "subordinate CA. The name will be suffixed by \" CA\" and assigned "
+    echo "as common name for the certificate."
+    echo
+    echo "N.B. This script does not allow spaces in the name."
+    echo 
+    read -e -p "Please enter the name of the subordinate CA : " sub
+    echo
+
+    # Change name to lower case and convert space to underscore for file operations
+    sublc=`echo $sub | tr [:upper:] [:lower:] | tr " " "_"`
+        
+    if [ -d "$root/sub/$sublc" ]; then
+        echo
+        echo "The subordinate CA already exists!"
+        echo
+        read e
+        return
+    fi
+
+    while true
+    do
+        echo "WARNING: You are creating a new subordinate CA with the common name \"$sub CA\"."
+        echo
+        echo "Please confirm by typing YES :"
+        read CONFIRM
+        case $CONFIRM in
+            YES|yes|Yes)
+                break ;;
+            *)
+                echo
+                read -e -p "Aborting. Press enter to continue."
+                echo
+                return
+                ;;
+        esac
+    done
+
+    echo
+    echo "Creating temporary configuration files."
+    cat "$path/template.conf" | \
+        sed "s/===COMMONNAME===/$sub CA/" | \
+        sed "s/===CANAME===/$sublc/" > "$path/temp_sub.conf"
+    cat "$path/template.conf" | \
+        sed "s|===COMMONNAME===|$organisation root CA|" | \
+        sed "s|===CANAME===|root|" | \
+        sed "s|CA:true|critical,CA:true|"> "$path/temp_root.conf"
+                
+    echo "Setting up folder structure."
+    mkdir -p "$root/sub/$sublc"/{public,private,requests,crl,pfx}
+    chmod 700 "$root/sub/$sublc/private" 
+    touch "$root/sub/$sublc/index.txt"
+    echo 01 > "$root/sub/$sublc/serial"
+    
+    echo "Generating the subordinate CA private key."
+    echo
+    pushd "$root/sub/$sublc"
+    openssl genrsa -des3 -passout pass:012345678 -out private/ca_$sublc.key 2048
+
+    echo "Generating the subordinate CA CSR."
+    echo
+    openssl req -batch -config "$path/temp_sub.conf" -new -passin pass:012345678 \
+        -key private/ca_$sublc.key -out requests/ca_$sublc.csr
+
+    echo
+    echo "Signing the subordinate CSR by the root CA."
+    echo
+    cp requests/ca_$sublc.csr "$root/requests/"
+    cd "$root"
+    
+    openssl ca -batch -policy policy_match -config "$path/temp_root.conf" \
+        -passin pass:012345678 -cert public/ca.crt \
+        -in requests/ca_$sublc.csr -keyfile private/ca.key -days 5475 \
+        -out public/ca_$sublc.crt -extensions v3_ca
+
+    cp public/ca_$sublc.crt "$root/sub/$sublc/public"
+
+    rm -f "$path/temp_root.conf"
+    rm -f "$path/temp_sub.conf"
+
+    # Copy certificate
+    cp public/ca_$sublc.crt "$path/all/"
+
+    popd 
+}
+
+function create_certificate {
+
+    echo
+    echo "Your are creating a new certificate. The certificate will be "
+    echo "signed by one of your subordinate CAs. The subordinate CA must be "
+    echo "set up prior to creating the certificate. The common name of the "
+    echo "certificate should normally match the hostname part of a URL, a "
+    echo "mail server or similar."
+    echo
+    echo "N.B. This script does not allow spaces in the common name."
+    echo
+
+    echo "These are your subordinate certificate authorities:"
+    echo
+    
+    for d in $(ls root/sub); do                
+        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        sub_name=$(get_certificate_cn $sub_ca_crt)
+        echo "  $d - $sub_name"
+    done
+    
+    echo
+    read -e -p "Which subordinate CA should sign the new certificate (left column) : " ca
+    
+    if [ ! -d root/sub/$ca ]; then
+        read -e -p "Incorrect subordinate CA name. Press enter to continue."
+        return
+    fi
+
+    echo
+    read -e -p "What common name should the new certificate have : " cn
+
+    echo
+    echo "What alternative names should the certificate include (if any)?"
+    echo "Note that only DNS names are supported. Just press enter to skip"
+    echo "adding alternative names."
+    read -e alt
+    echo
+    
+    # A little roundabout way of doing it. We want to have email:move as SubjectAltNames
+    # in most cases but when the user has specified a list of names we want to replace it
+    # with them instead.
+    if [ ! -z $alt ]; then
+        alt=`echo $alt | sed "s/,/,DNS:/g" | awk '{ print "DNS:" $0 }'`
+    else
+        alt="email:move"
+    fi
+        
+    while true
+    do
+        echo "WARNING: You are creating a new certificate with the common name \"$cn\"."
+        echo
+        echo "Please confirm by typing YES :"
+        read CONFIRM
+        case $CONFIRM in
+            YES|yes|Yes)
+                break ;;
+            *)
+                echo
+                read -e -p "Aborting."
+                echo
+                return
+                ;;
+        esac
+    done
+    
+    cnf=`echo $cn | tr '.' '_'`    
+    
+    echo "Creating temporary configuration files."
+    cat "$path/template.conf" | \
+        sed "s/===COMMONNAME===/$cn/" | \
+        sed "s/===CANAME===/$ca/" | \
+        sed "s/email:move/$alt/" > "$path/temp_sub.conf"
+        
+    echo
+    echo "Generating a CSR"
+    pushd "$root/sub/$ca"
+    openssl req -batch -nodes -new -passout pass:012345678 -keyout private/$cnf.key \
+        -out requests/$cnf.csr -config "$path/temp_sub.conf"
+
+    echo "Signing the CSR by the subordinate CA"
+    echo
+    openssl ca -batch -policy policy_match -config "$path/temp_sub.conf" \
+        -passin pass:012345678 -cert public/ca_$ca.crt -in requests/$cnf.csr \
+        -keyfile private/ca_$ca.key -days 1825 -out public/$cnf.crt
+
+    echo
+    echo "Creating a .pfx file with all certificates from the certificate chain"
+    echo
+    cat "$root/public/ca.crt" public/ca_$ca.crt > temp.crt
+    openssl pkcs12 -export -nodes -passout pass: \
+        -in public/$cnf.crt -inkey private/$cnf.key -certfile temp.crt -out pfx/$cnf.pfx
+    openssl pkcs12 -export -nodes -passout pass: \
+        -in public/$cnf.crt -inkey private/$cnf.key -out pfx/$cnf-single.pfx
+    rm temp.crt
+
+    rm -f "$path/temp_sub.conf"
+    
+    # Copy certificates and keys
+    cp private/$cnf.key "$path/all/"
+    cp public/$cnf.crt "$path/all/"
+    cp pfx/$cnf.pfx "$path/all/"
+    cp pfx/$cnf-single.pfx "$path/all/"
+    
+    popd
+}
+
+function renew_certificate {
+    echo
+    echo "To renew a certificate you must specify which subordinate CA that"
+    echo "signed the certificate as well as the name of the certificate to"
+    echo "renew."
+    echo
+
+    echo "These are your subordinate certificate authorities:"
+    echo
+    
+    for d in $(ls root/sub); do                
+        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        sub_name=$(get_certificate_cn $sub_ca_crt)
+        echo "  $d - $sub_name"
+    done
+    
+    echo
+    read -e -p "Which subordinate CA signed the certificate (left column) : " ca
+    
+    if [ ! -d root/sub/$ca ]; then
+        read -e -p "Incorrect subordinate CA name. Press enter to continue."
+        return
+    fi
+
+    echo "These are the certificates signed by this subordinate CA:"
+    echo
+    
+    for f in $(ls -1 root/sub/$ca/public/*.crt | grep -v ca_ | sed 's/.*\///'); do
+        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        cert_name=$(get_certificate_cn root/sub/$ca/public/$f)
+        cert_expiration=$(get_certificate_expiration root/sub/$ca/public/$f)
+        echo "  $f - [$cert_name / $cert_expiration]"
+    done
+    
+    echo
+    read -e -p "Which certificate do you want to renew (left column) : " fn_cert
+    
+    if [ ! -f root/sub/$ca/public/$fn_cert ]; then
+        read -e -p "Incorrect certificate filename. Press enter to continue."
+        return
+    fi
+
+    cnf=`echo $fn_cert | sed 's/.\crt$//'`
+
+    echo "Creating temporary configuration files."
+    cat "$path/template.conf" | \
+        sed "s/===CANAME===/$ca/" > "$path/temp_sub.conf"
+        
+    pushd "$root/sub/$ca"
+    
+    # Revoke the old certificate
+    revoke_impl $ca $cnf
+
+    # Now that the old certificate is revoked we can sign the CSR again
+    
+    echo "Signing the CSR by the subordinate CA"
+    echo
+    openssl ca -batch -policy policy_match -config "$path/temp_sub.conf" \
+        -passin pass:012345678 -cert public/ca_$ca.crt -in requests/$cnf.csr \
+        -keyfile private/ca_$ca.key -days 1825 -out public/$cnf.crt
+
+    echo
+    echo "Creating a .pfx file with all certificates from the certificate chain"
+    echo
+    cat "$root/public/ca.crt" public/ca_$ca.crt > temp.crt
+    openssl pkcs12 -export -nodes -passout pass: \
+        -in public/$cnf.crt -inkey private/$cnf.key -certfile temp.crt -out pfx/$cnf.pfx
+    openssl pkcs12 -export -nodes -passout pass: \
+        -in public/$cnf.crt -inkey private/$cnf.key -out pfx/$cnf-single.pfx
+    rm temp.crt
+
+    rm -f "$path/temp_sub.conf"
+    
+    # Copy certificates
+    cp public/$cnf.crt "$path/all/"
+    cp pfx/$cnf.pfx "$path/all/"
+    cp pfx/$cnf-single.pfx "$path/all/"
+    
+    popd
+}
+
+
+function revoke_certificate {
+    echo
+    echo "To revoke a certificate you must specify which subordinate CA that"
+    echo "signed the certificate as well as the name of the certificate to"
+    echo "revoke."
+    echo
+
+    echo "These are your subordinate certificate authorities:"
+    echo
+    
+    for d in $(ls root/sub); do
+        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        sub_name=$(get_certificate_cn $sub_ca_crt)
+        echo "  $d - $sub_name"
+    done
+    
+    echo
+    read -e -p "Which subordinate CA signed the certificate (left column) : " ca
+    
+    if [ ! -d root/sub/$ca ]; then
+        read -e -p "Incorrect subordinate CA name. Press enter to continue."
+        return
+    fi
+
+    echo "These are the certificates signed by this subordinate CA:"
+    echo
+    
+    for f in $(ls -1 root/sub/$ca/public/*.crt | grep -v ca_ | sed 's/.*\///'); do
+        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        cert_name=$(get_certificate_cn root/sub/$ca/public/$f)
+        cert_expiration=$(get_certificate_expiration root/sub/$ca/public/$f)
+        cert_status=$(get_certificate_status $ca $cert_name)
+        if [ $cert_status != "R" ]; then
+            echo "  $f - [$cert_name / $cert_expiration]"
+        fi
+    done
+    
+    echo
+    read -e -p "Which certificate do you want to revoke (left column) : " fn_cert
+    
+    if [ ! -f root/sub/$ca/public/$fn_cert ]; then
+        read -e -p "Incorrect certificate filename. Press enter to continue."
+        return
+    fi
+
+    cnf=`echo $fn_cert | sed 's/.\crt$//'`
+
+    revoke_impl $ca $cnf
+}
+
+function update_crl {
+
+    cat "$path/template.conf" | \
+        sed "s|===COMMONNAME===|$organisation root CA|" | \
+        sed "s|===CANAME===|root|" | \
+        sed "s|CA:true|critical,CA:true|"> "$path/temp_root.conf"
+
+    pushd root
+
+    # Root CA
+    echo "Generating CRL for the root CA."
+    openssl ca -gencrl -config "$path/temp_root.conf" -crlexts crl_ext \
+        -passin pass:012345678 -keyfile private/ca.key -cert public/ca.crt \
+        -out crl/root.crl
+    cp crl/root.crl "$path/crl/"
+
+    # Subordinates
+    for d in $(ls sub); do    
+        sub_ca_crt=$(ls sub/$d/public/ca_*)
+        sub_name=$(get_certificate_cn $sub_ca_crt)
+        echo "Generating CRL for $sub_name"
+
+        cat "$path/template.conf" | \
+            sed "s/===CANAME===/$d/" > "$path/temp_sub.conf"
+
+        pushd sub/$d
+        
+        openssl ca -gencrl -config "$path/temp_sub.conf" -crlexts crl_ext \
+            -passin pass:012345678 -keyfile private/ca_$d.key -cert public/ca_$d.crt \
+            -out crl/$d.crl
+        cp crl/$d.crl "$path/crl/"
+        
+        rm -f "$path/temp_sub.conf"
+
+        popd
+    done
+
+    rm -f "$path/temp_root.conf"
+    
+    popd
+}
+
+function backup {
+
+    dt=`date -u +%Y%m%d-%H%M%S`
+    fn="$dt.tar.gz"
+    
+    mkdir -p "$path/backup"
+    
+    # Note: Some implementations of 'tar' does not include the --transform option.
+    # This script checks the exit code of tar and runs the command without the
+    # transformation if this is the case. 
+    tar -cvzf "$path/backup/$fn" --transform "s|^|/$dt/|" --directory "$path" --exclude backup* *
+    
+    if [ $? -ne 0 ]; then
+        tar -cvzf "$path/backup/alt_$fn" --directory "$path" --exclude backup* *
+        echo
+        echo "NOTE: Your 'tar' command does not support file name transformation."
+        echo "Check the structure of the archive before unpacking the archive."
+    fi
+
+    echo
+    read -e -p "Press enter to continue."
+}
+
+function clean {
+    while true
+    do
+        echo -n "WARNING! Do you want to wipe all settings (yes or no) : "
+        read CONFIRM
+        case $CONFIRM in
+            YES|yes|Yes)
+                break ;;
+            no|NO|No)
+                echo
+                echo Aborting. Run this script again to retry.
+                echo
+                return
+                ;;
+        esac
+    done    
+    
+    while true
+    do
+        echo -n "WARNING! You are wiping all settings. Do you want to abort (yes or no) : "
+        read CONFIRM
+        case $CONFIRM in
+            no|NO|No)
+                break ;;
+            YES|yes|Yes)        
+                echo
+                echo Aborting. Run this script again to retry.
+                echo
+                return
+                ;;
+        esac
+    done    
+    
+    pushd "$path"
+    
+    rm -rf root
+    rm -rf all
+    rm -rf crl
+    rm -f template.conf
+    rm -f temp_*
+    
+    popd
+}
+
+###################### Main #########################
+
+# Setup the certificate authority if it hasn't been initialised
+if [ ! -f template.conf ]; then
+    setup_ca
+fi
+
+# Main menu
+while :
+do
+    clear
+    echo
+    echo "   M A I N - M E N U"
+    echo 
+    echo "1. List authorities and certificates"
+    echo "2. Create subordinate certificate authority"
+    echo "3. Create new certificate"
+    echo "4. Renew certificate"
+    echo "5. Revoke certificate"
+    echo "6. Update certificate revocation lists"
+    echo "7. Backup certificate hierarchy"
+    echo "8. Completely wipe the certificate hierarchy"
+    echo "9. Quit"
+    echo
+    echo -n "Please select option  "
+    read -e opt
+
+    case $opt in
+        1) list_all;;
+        2) create_sub_ca;;
+        3) create_certificate;;
+        4) renew_certificate;;
+        5) revoke_certificate;;
+        6) update_crl;;
+        7) backup;;
+        8) clean;;
+        9) exit;;
+        *) echo 
+            echo "$opt is an invaild option.";
+            echo "Press [enter] key to continue. . .";
+            read e;;
+    esac
+done
+
+
