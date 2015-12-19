@@ -40,7 +40,8 @@
 ############# Constants and variables ###############
 
 path=$(cd `dirname $0` && pwd)
-root=$path/root
+data=$path/data
+root=$data/root
 organisation=''
 
 # Read organisation name from the configuration file. If the
@@ -101,18 +102,18 @@ function list_all {
     echo
 
     # Root CA
-    root_name=$(get_certificate_cn root/public/ca.crt)
-    root_expiration=$(get_certificate_expiration root/public/ca.crt)
+    root_name=$(get_certificate_cn $root/public/ca.crt)
+    root_expiration=$(get_certificate_expiration $root/public/ca.crt)
     echo $root_name [$root_expiration]
 
-    for d in $(ls root/sub 2>/dev/null); do        
+    for d in $(ls $root/sub 2>/dev/null); do
 
-        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+        sub_ca_crt=$(ls $root/sub/$d/public/ca_*)
         sub_name=$(get_certificate_cn $sub_ca_crt)
         sub_expiration=$(get_certificate_expiration $sub_ca_crt)
         echo "  $sub_name [$sub_expiration]"
 
-        for c in $(ls -1 root/sub/$d/public/*.crt | grep -v ca_); do
+        for c in $(ls -1 $root/sub/$d/public/*.crt | grep -v ca_); do
 
             c_name=$(get_certificate_cn $c)
             c_expiration=$(get_certificate_expiration $c)
@@ -138,11 +139,11 @@ function setup_ca {
     fi
 
     echo "Setting up folder structure."
-    mkdir -p ./{all,crl}
-    mkdir -p root/{public,private,requests,crl}
-    chmod 700 root/private
-    touch root/index.txt
-    echo 01 > root/serial
+    mkdir -p $data/{all,crl}
+    mkdir -p $root/{public,private,requests,crl}
+    chmod 700 $root/private
+    touch $root/index.txt
+    echo 01 > $root/serial
     
     if [[ -z $cmd ]]; then
         echo
@@ -207,7 +208,7 @@ function setup_ca {
         sed "s|===ORGANISATION===|$organisation|" | \
         sed "s|===UNIT===|$unit|" | \
         sed "s|===EMAIL===|$email|" | \
-        sed "s|===URL===|$url|" > "$path/template.conf"
+        sed "s|===URL===|$url|" > "$data/template.conf"
         
     
     echo "Generating root CA private key. This may take a while."
@@ -215,22 +216,22 @@ function setup_ca {
     openssl genrsa -des3 -passout pass:012345678 -out private/ca.key 4096
     
     echo "Generating temporary root configuration file."
-    cat "$path/template.conf" | \
+    cat "$data/template.conf" | \
         sed "s|===COMMONNAME===|$organisation root CA|" | \
         sed "s|===CANAME===|root|" | \
-        sed "s|CA:true|critical,CA:true|"> "$path/temp_root.conf"
+        sed "s|CA:true|critical,CA:true|"> "$data/temp_root.conf"
                 
     echo "Generating the root CA certificate."
-    openssl req -batch -config "$path/temp_root.conf" -new -x509 -extensions v3_ca \
+    openssl req -batch -config "$data/temp_root.conf" -new -x509 -extensions v3_ca \
         -passin pass:012345678 -days 9125 -key "$root/private/ca.key" -out "$root/public/ca.crt"
     
     openssl x509 -in "$root/public/ca.crt" -out "$root/public/ca.pem" -outform PEM
 
     echo "Removing temporary configuration file."
-    rm "$path/temp_root.conf"
+    rm "$data/temp_root.conf"
 
     # Copy certificate
-    cp public/ca.{crt,pem} "$path/all/"
+    cp public/ca.{crt,pem} "$data/all/"
 
     popd
 }
@@ -283,13 +284,13 @@ function create_sub_ca {
 
     echo
     echo "Creating temporary configuration files."
-    cat "$path/template.conf" | \
+    cat "$data/template.conf" | \
         sed "s/===COMMONNAME===/$sub CA/" | \
-        sed "s/===CANAME===/$sublc/" > "$path/temp_sub.conf"
-    cat "$path/template.conf" | \
+        sed "s/===CANAME===/$sublc/" > "$data/temp_sub.conf"
+    cat "$data/template.conf" | \
         sed "s|===COMMONNAME===|$organisation root CA|" | \
         sed "s|===CANAME===|root|" | \
-        sed "s|CA:true|critical,CA:true|"> "$path/temp_root.conf"
+        sed "s|CA:true|critical,CA:true|"> "$data/temp_root.conf"
                 
     echo "Setting up folder structure."
     mkdir -p "$root/sub/$sublc"/{public,private,requests,crl,pfx}
@@ -304,7 +305,7 @@ function create_sub_ca {
 
     echo "Generating the subordinate CA CSR."
     echo
-    openssl req -batch -config "$path/temp_sub.conf" -new -passin pass:012345678 \
+    openssl req -batch -config "$data/temp_sub.conf" -new -passin pass:012345678 \
         -key private/ca_$sublc.key -out requests/ca_$sublc.csr
 
     echo
@@ -313,7 +314,7 @@ function create_sub_ca {
     cp requests/ca_$sublc.csr "$root/requests/"
     cd "$root"
     
-    openssl ca -batch -policy policy_match -config "$path/temp_root.conf" \
+    openssl ca -batch -policy policy_match -config "$data/temp_root.conf" \
         -passin pass:012345678 -cert public/ca.crt \
         -in requests/ca_$sublc.csr -keyfile private/ca.key -days 5475 \
         -out public/ca_$sublc.crt -extensions v3_ca
@@ -322,11 +323,11 @@ function create_sub_ca {
 
     cp public/ca_$sublc.{crt,pem} "$root/sub/$sublc/public"
 
-    rm -f "$path/temp_root.conf"
-    rm -f "$path/temp_sub.conf"
+    rm -f "$data/temp_root.conf"
+    rm -f "$data/temp_sub.conf"
 
     # Copy certificate
-    cp public/ca_$sublc.{crt,pem} "$path/all/"
+    cp public/ca_$sublc.{crt,pem} "$data/all/"
 
     popd 
 }
@@ -346,8 +347,8 @@ function create_certificate {
     echo "These are your subordinate certificate authorities:"
     echo
     
-    for d in $(ls root/sub); do                
-        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+    for d in $(ls $root/sub); do
+        sub_ca_crt=$(ls $root/sub/$d/public/ca_*)
         sub_name=$(get_certificate_cn $sub_ca_crt)
         echo "  $d - $sub_name"
     done
@@ -357,7 +358,7 @@ function create_certificate {
         read -e -p "Which subordinate CA should sign the new certificate (left column) : " ca
     fi
     
-    if [ ! -d root/sub/$ca ]; then
+    if [ ! -d $root/sub/$ca ]; then
         read -e -p "Incorrect subordinate CA name. Press enter to continue."
         return
     fi
@@ -408,20 +409,20 @@ function create_certificate {
     cnf=`echo $cn | tr '.' '_'`    
     
     echo "Creating temporary configuration files."
-    cat "$path/template.conf" | \
+    cat "$data/template.conf" | \
         sed "s/===COMMONNAME===/$cn/" | \
         sed "s/===CANAME===/$ca/" | \
-        sed "s/email:move/$alt/" > "$path/temp_sub.conf"
+        sed "s/email:move/$alt/" > "$data/temp_sub.conf"
         
     echo
     echo "Generating a CSR"
     pushd "$root/sub/$ca"
     openssl req -batch -nodes -new -passout pass:012345678 -keyout private/$cnf.key \
-        -out requests/$cnf.csr -config "$path/temp_sub.conf"
+        -out requests/$cnf.csr -config "$data/temp_sub.conf"
 
     echo "Signing the CSR by the subordinate CA"
     echo
-    openssl ca -batch -policy policy_match -config "$path/temp_sub.conf" \
+    openssl ca -batch -policy policy_match -config "$data/temp_sub.conf" \
         -passin pass:012345678 -cert public/ca_$ca.crt -in requests/$cnf.csr \
         -keyfile private/ca_$ca.key -days 1825 -out public/$cnf.crt
 
@@ -437,13 +438,13 @@ function create_certificate {
 
     openssl x509 -in "public/$cnf.crt" -out "public/$cnf.pem" -outform PEM
 
-    rm -f "$path/temp_sub.conf"
+    rm -f "$data/temp_sub.conf"
     
     # Copy certificates and keys
-    cp private/$cnf.key "$path/all/"
-    cp public/$cnf.{crt,pem} "$path/all/"
-    cp pfx/$cnf.pfx "$path/all/"
-    cp pfx/$cnf-single.pfx "$path/all/"
+    cp private/$cnf.key "$data/all/"
+    cp public/$cnf.{crt,pem} "$data/all/"
+    cp pfx/$cnf.pfx "$data/all/"
+    cp pfx/$cnf-single.pfx "$data/all/"
     
     popd
 }
@@ -458,8 +459,8 @@ function renew_certificate {
     echo "These are your subordinate certificate authorities:"
     echo
     
-    for d in $(ls root/sub); do                
-        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+    for d in $(ls $root/sub); do
+        sub_ca_crt=$(ls $root/sub/$d/public/ca_*)
         sub_name=$(get_certificate_cn $sub_ca_crt)
         echo "  $d - $sub_name"
     done
@@ -467,7 +468,7 @@ function renew_certificate {
     echo
     read -e -p "Which subordinate CA signed the certificate (left column) : " ca
     
-    if [ ! -d root/sub/$ca ]; then
+    if [ ! -d $root/sub/$ca ]; then
         read -e -p "Incorrect subordinate CA name. Press enter to continue."
         return
     fi
@@ -475,17 +476,17 @@ function renew_certificate {
     echo "These are the certificates signed by this subordinate CA:"
     echo
     
-    for f in $(ls -1 root/sub/$ca/public/*.crt | grep -v ca_ | sed 's/.*\///'); do
-        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
-        cert_name=$(get_certificate_cn root/sub/$ca/public/$f)
-        cert_expiration=$(get_certificate_expiration root/sub/$ca/public/$f)
+    for f in $(ls -1 $root/sub/$ca/public/*.crt | grep -v ca_ | sed 's/.*\///'); do
+        sub_ca_crt=$(ls $root/sub/$d/public/ca_*)
+        cert_name=$(get_certificate_cn $root/sub/$ca/public/$f)
+        cert_expiration=$(get_certificate_expiration $root/sub/$ca/public/$f)
         echo "  $f - [$cert_name / $cert_expiration]"
     done
     
     echo
     read -e -p "Which certificate do you want to renew (left column) : " fn_cert
     
-    if [ ! -f root/sub/$ca/public/$fn_cert ]; then
+    if [ ! -f $root/sub/$ca/public/$fn_cert ]; then
         read -e -p "Incorrect certificate filename. Press enter to continue."
         return
     fi
@@ -493,8 +494,8 @@ function renew_certificate {
     cnf=`echo $fn_cert | sed 's/.\crt$//'`
 
     echo "Creating temporary configuration files."
-    cat "$path/template.conf" | \
-        sed "s/===CANAME===/$ca/" > "$path/temp_sub.conf"
+    cat "$data/template.conf" | \
+        sed "s/===CANAME===/$ca/" > "$data/temp_sub.conf"
         
     pushd "$root/sub/$ca"
     
@@ -505,7 +506,7 @@ function renew_certificate {
     
     echo "Signing the CSR by the subordinate CA"
     echo
-    openssl ca -batch -policy policy_match -config "$path/temp_sub.conf" \
+    openssl ca -batch -policy policy_match -config "$data/temp_sub.conf" \
         -passin pass:012345678 -cert public/ca_$ca.crt -in requests/$cnf.csr \
         -keyfile private/ca_$ca.key -days 1825 -out public/$cnf.crt
 
@@ -519,12 +520,12 @@ function renew_certificate {
         -in public/$cnf.crt -inkey private/$cnf.key -out pfx/$cnf-single.pfx
     rm temp.crt
 
-    rm -f "$path/temp_sub.conf"
+    rm -f "$data/temp_sub.conf"
     
     # Copy certificates
-    cp public/$cnf.crt "$path/all/"
-    cp pfx/$cnf.pfx "$path/all/"
-    cp pfx/$cnf-single.pfx "$path/all/"
+    cp public/$cnf.crt "$data/all/"
+    cp pfx/$cnf.pfx "$data/all/"
+    cp pfx/$cnf-single.pfx "$data/all/"
     
     popd
 }
@@ -540,8 +541,8 @@ function revoke_certificate {
     echo "These are your subordinate certificate authorities:"
     echo
     
-    for d in $(ls root/sub); do
-        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
+    for d in $(ls $root/sub); do
+        sub_ca_crt=$(ls $root/sub/$d/public/ca_*)
         sub_name=$(get_certificate_cn $sub_ca_crt)
         echo "  $d - $sub_name"
     done
@@ -549,7 +550,7 @@ function revoke_certificate {
     echo
     read -e -p "Which subordinate CA signed the certificate (left column) : " ca
     
-    if [ ! -d root/sub/$ca ]; then
+    if [ ! -d $root/sub/$ca ]; then
         read -e -p "Incorrect subordinate CA name. Press enter to continue."
         return
     fi
@@ -557,10 +558,10 @@ function revoke_certificate {
     echo "These are the certificates signed by this subordinate CA:"
     echo
     
-    for f in $(ls -1 root/sub/$ca/public/*.crt | grep -v ca_ | sed 's/.*\///'); do
-        sub_ca_crt=$(ls root/sub/$d/public/ca_*)
-        cert_name=$(get_certificate_cn root/sub/$ca/public/$f)
-        cert_expiration=$(get_certificate_expiration root/sub/$ca/public/$f)
+    for f in $(ls -1 $root/sub/$ca/public/*.crt | grep -v ca_ | sed 's/.*\///'); do
+        sub_ca_crt=$(ls $root/sub/$d/public/ca_*)
+        cert_name=$(get_certificate_cn $root/sub/$ca/public/$f)
+        cert_expiration=$(get_certificate_expiration $root/sub/$ca/public/$f)
         cert_status=$(get_certificate_status $ca $cert_name)
         if [ $cert_status != "R" ]; then
             echo "  $f - [$cert_name / $cert_expiration]"
@@ -570,7 +571,7 @@ function revoke_certificate {
     echo
     read -e -p "Which certificate do you want to revoke (left column) : " fn_cert
     
-    if [ ! -f root/sub/$ca/public/$fn_cert ]; then
+    if [ ! -f $root/sub/$ca/public/$fn_cert ]; then
         read -e -p "Incorrect certificate filename. Press enter to continue."
         return
     fi
@@ -582,19 +583,19 @@ function revoke_certificate {
 
 function update_crl {
 
-    cat "$path/template.conf" | \
+    cat "$data/template.conf" | \
         sed "s|===COMMONNAME===|$organisation root CA|" | \
         sed "s|===CANAME===|root|" | \
-        sed "s|CA:true|critical,CA:true|"> "$path/temp_root.conf"
+        sed "s|CA:true|critical,CA:true|"> "$data/temp_root.conf"
 
-    pushd root
+    pushd $root
 
     # Root CA
     echo "Generating CRL for the root CA."
-    openssl ca -gencrl -config "$path/temp_root.conf" -crlexts crl_ext \
+    openssl ca -gencrl -config "$data/temp_root.conf" -crlexts crl_ext \
         -passin pass:012345678 -keyfile private/ca.key -cert public/ca.crt \
         -out crl/root.crl
-    cp crl/root.crl "$path/crl/"
+    cp crl/root.crl "$data/crl/"
 
     # Subordinates
     for d in $(ls sub); do    
@@ -602,22 +603,22 @@ function update_crl {
         sub_name=$(get_certificate_cn $sub_ca_crt)
         echo "Generating CRL for $sub_name"
 
-        cat "$path/template.conf" | \
-            sed "s/===CANAME===/$d/" > "$path/temp_sub.conf"
+        cat "$data/template.conf" | \
+            sed "s/===CANAME===/$d/" > "$data/temp_sub.conf"
 
         pushd sub/$d
         
-        openssl ca -gencrl -config "$path/temp_sub.conf" -crlexts crl_ext \
+        openssl ca -gencrl -config "$data/temp_sub.conf" -crlexts crl_ext \
             -passin pass:012345678 -keyfile private/ca_$d.key -cert public/ca_$d.crt \
             -out crl/$d.crl
-        cp crl/$d.crl "$path/crl/"
+        cp crl/$d.crl "$data/crl/"
         
-        rm -f "$path/temp_sub.conf"
+        rm -f "$data/temp_sub.conf"
 
         popd
     done
 
-    rm -f "$path/temp_root.conf"
+    rm -f "$data/temp_root.conf"
     
     popd
 }
@@ -680,11 +681,7 @@ function clean {
     
     pushd "$path"
     
-    rm -rf root
-    rm -rf all
-    rm -rf crl
-    rm -f template.conf
-    rm -f temp_*
+    rm -rf $data
     
     popd
 }
@@ -737,7 +734,7 @@ done
 
 case $cmd in
     ca)
-    if [ ! -f template.conf ]; then
+    if [ ! -f $data/template.conf ]; then
         setup_ca
     fi
     exit
@@ -753,7 +750,7 @@ case $cmd in
 esac
 
 # Setup the certificate authority if it hasn't been initialised
-if [ ! -f template.conf ]; then
+if [ ! -f $data/template.conf ]; then
     setup_ca
 fi
 
