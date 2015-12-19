@@ -5,7 +5,7 @@
 #
 # The MIT License (MIT)
 # 
-# Copyright (c) 2009 Spotwise
+# Copyright (c) 2009,2015 Spotwise
 # 
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,17 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #  
+
+#
+# This script is intended to be run without arguments. However, it is
+# also possible to provide arguments to perform some standard
+# functions. Note that there is virtually no error-checking of
+# arguments. Example commands to set up a certificate hierarchy:
+#
+# ./ca -c ca -C SE -P Somewhere -L City -O Example -U IT -E cert@example.com -R http://cert.example.com
+# ./ca -c sub -S Contoso
+# ./ca -c cert -S contoso -N www.contoso.com -A www.contoso.com,contoso.com,www.example.com,example.com
+#
 
 ############# Constants and variables ###############
 
@@ -119,10 +130,12 @@ function list_all {
 
 function setup_ca {
 
-    echo
-    echo "It appears that you haven't yet set up a certificate authority."
-    echo "Please press Enter to do it now or Ctrl+C to abort."
-    read e
+    if [[ -z $cmd ]]; then
+        echo
+        echo "It appears that you haven't yet set up a certificate authority."
+        echo "Please press Enter to do it now or Ctrl+C to abort."
+        read e
+    fi
 
     echo "Setting up folder structure."
     mkdir -p ./{all,crl}
@@ -131,21 +144,45 @@ function setup_ca {
     touch root/index.txt
     echo 01 > root/serial
     
+    if [[ -z $cmd ]]; then
+        echo
+        echo "Please provide some details about yourself. Note that "
+        echo "all data should be entered in printable 7-bit ASCII "
+        echo "only."
+        echo
+    fi
+    if [[ -z $country ]]; then
+        read -e -p "Country name (2 characters)     : " country
+    fi
+    if [[ -z $province ]]; then
+        read -e -p "State or province name          : " province
+    fi
+    if [[ -z $locality ]]; then
+        read -e -p "Locality (city)                 : " locality
+    fi
+    if [[ -z $organisation ]]; then
+        read -e -p "Organisation name               : " organisation
+    fi
+    if [[ -z $unit ]]; then
+        read -e -p "Organisational unit name        : " unit
+    fi
+    if [[ -z $email ]]; then
+        read -e -p "Email address                   : " email
+    fi
+    if [[ -z $url ]]; then
+        read -e -p "URL for CRL (no trailing slash) : " url
+    fi
     echo
-    echo "Please provide some details about yourself. Note that "
-    echo "all data should be entered in printable 7-bit ASCII "
-    echo "only."
-    echo
-    read -e -p "Country name (2 characters)     : " country
-    read -e -p "State or province name          : " province
-    read -e -p "Locality (city)                 : " locality
-    read -e -p "Organisation name               : " organisation
-    read -e -p "Organisational unit name        : " unit
-    read -e -p "Email address                   : " email
-    read -e -p "URL for CRL (no trailing slash) : " url
-    echo
-    
-    while true
+
+    echo "Country           : " $country
+    echo "State or province : " $province
+    echo "Locality          : " $locality
+    echo "Organisation      : " $organisation
+    echo "Unit              : " $unit
+    echo "Email             : " $email
+    echo "CRL               : " $url
+
+    while true && [[ -z $cmd ]]
     do
         echo -n "Please confirm these settings (y or n) :"
         read CONFIRM
@@ -187,27 +224,31 @@ function setup_ca {
     openssl req -batch -config "$path/temp_root.conf" -new -x509 -extensions v3_ca \
         -passin pass:012345678 -days 9125 -key "$root/private/ca.key" -out "$root/public/ca.crt"
     
+    openssl x509 -in "$root/public/ca.crt" -out "$root/public/ca.pem" -outform PEM
+
     echo "Removing temporary configuration file."
     rm "$path/temp_root.conf"
 
     # Copy certificate
-    cp public/ca.crt "$path/all/"
+    cp public/ca.{crt,pem} "$path/all/"
 
     popd
 }
 
 function create_sub_ca {
 
-    echo
-    echo "Subordinate certificate authorities are signed by the root CA and "
-    echo "are used to sign certificates. You must enter the name of the "
-    echo "subordinate CA. The name will be suffixed by \" CA\" and assigned "
-    echo "as common name for the certificate."
-    echo
-    echo "N.B. This script does not allow spaces in the name."
-    echo 
-    read -e -p "Please enter the name of the subordinate CA : " sub
-    echo
+    if [[ -z $sub ]]; then
+        echo
+        echo "Subordinate certificate authorities are signed by the root CA and "
+        echo "are used to sign certificates. You must enter the name of the "
+        echo "subordinate CA. The name will be suffixed by \" CA\" and assigned "
+        echo "as common name for the certificate."
+        echo
+        echo "N.B. This script does not allow spaces in the name."
+        echo
+        read -e -p "Please enter the name of the subordinate CA : " sub
+        echo
+    fi
 
     # Change name to lower case and convert space to underscore for file operations
     sublc=`echo $sub | tr [:upper:] [:lower:] | tr " " "_"`
@@ -220,23 +261,25 @@ function create_sub_ca {
         return
     fi
 
-    while true
-    do
-        echo "WARNING: You are creating a new subordinate CA with the common name \"$sub CA\"."
-        echo
-        echo "Please confirm by typing YES :"
-        read CONFIRM
-        case $CONFIRM in
-            YES|yes|Yes)
-                break ;;
-            *)
-                echo
-                read -e -p "Aborting. Press enter to continue."
-                echo
-                return
-                ;;
-        esac
-    done
+    if [[ -z $sub ]]; then
+        while true
+        do
+            echo "WARNING: You are creating a new subordinate CA with the common name \"$sub CA\"."
+            echo
+            echo "Please confirm by typing YES :"
+            read CONFIRM
+            case $CONFIRM in
+                YES|yes|Yes)
+                    break ;;
+                *)
+                    echo
+                    read -e -p "Aborting. Press enter to continue."
+                    echo
+                    return
+                    ;;
+            esac
+        done
+    fi
 
     echo
     echo "Creating temporary configuration files."
@@ -275,13 +318,15 @@ function create_sub_ca {
         -in requests/ca_$sublc.csr -keyfile private/ca.key -days 5475 \
         -out public/ca_$sublc.crt -extensions v3_ca
 
-    cp public/ca_$sublc.crt "$root/sub/$sublc/public"
+    openssl x509 -in "public/ca_$sublc.crt" -out "public/ca_$sublc.pem" -outform PEM
+
+    cp public/ca_$sublc.{crt,pem} "$root/sub/$sublc/public"
 
     rm -f "$path/temp_root.conf"
     rm -f "$path/temp_sub.conf"
 
     # Copy certificate
-    cp public/ca_$sublc.crt "$path/all/"
+    cp public/ca_$sublc.{crt,pem} "$path/all/"
 
     popd 
 }
@@ -289,7 +334,7 @@ function create_sub_ca {
 function create_certificate {
 
     echo
-    echo "Your are creating a new certificate. The certificate will be "
+    echo "You are creating a new certificate. The certificate will be "
     echo "signed by one of your subordinate CAs. The subordinate CA must be "
     echo "set up prior to creating the certificate. The common name of the "
     echo "certificate should normally match the hostname part of a URL, a "
@@ -307,23 +352,29 @@ function create_certificate {
         echo "  $d - $sub_name"
     done
     
-    echo
-    read -e -p "Which subordinate CA should sign the new certificate (left column) : " ca
+    if [[ -z $ca ]]; then
+        echo
+        read -e -p "Which subordinate CA should sign the new certificate (left column) : " ca
+    fi
     
     if [ ! -d root/sub/$ca ]; then
         read -e -p "Incorrect subordinate CA name. Press enter to continue."
         return
     fi
 
-    echo
-    read -e -p "What common name should the new certificate have : " cn
+    if [[ -z $cn ]]; then
+        echo
+        read -e -p "What common name should the new certificate have : " cn
+    fi
 
-    echo
-    echo "What alternative names should the certificate include (if any)?"
-    echo "Note that only DNS names are supported. Just press enter to skip"
-    echo "adding alternative names."
-    read -e alt
-    echo
+    if [[ -z $alt ]]; then
+        echo
+        echo "What alternative names should the certificate include (if any)?"
+        echo "Note that only DNS names are supported. Just press enter to skip"
+        echo "adding alternative names."
+        read -e alt
+        echo
+    fi
     
     # A little roundabout way of doing it. We want to have email:move as SubjectAltNames
     # in most cases but when the user has specified a list of names we want to replace it
@@ -333,24 +384,26 @@ function create_certificate {
     else
         alt="email:move"
     fi
-        
-    while true
-    do
-        echo "WARNING: You are creating a new certificate with the common name \"$cn\"."
-        echo
-        echo "Please confirm by typing YES :"
-        read CONFIRM
-        case $CONFIRM in
-            YES|yes|Yes)
-                break ;;
-            *)
-                echo
-                read -e -p "Aborting."
-                echo
-                return
-                ;;
-        esac
-    done
+
+    if [[ -z $cmd ]]; then
+        while true
+        do
+            echo "WARNING: You are creating a new certificate with the common name \"$cn\"."
+            echo
+            echo "Please confirm by typing YES :"
+            read CONFIRM
+            case $CONFIRM in
+                YES|yes|Yes)
+                    break ;;
+                *)
+                    echo
+                    read -e -p "Aborting."
+                    echo
+                    return
+                    ;;
+            esac
+        done
+    fi
     
     cnf=`echo $cn | tr '.' '_'`    
     
@@ -382,11 +435,13 @@ function create_certificate {
         -in public/$cnf.crt -inkey private/$cnf.key -out pfx/$cnf-single.pfx
     rm temp.crt
 
+    openssl x509 -in "public/$cnf.crt" -out "public/$cnf.pem" -outform PEM
+
     rm -f "$path/temp_sub.conf"
     
     # Copy certificates and keys
     cp private/$cnf.key "$path/all/"
-    cp public/$cnf.crt "$path/all/"
+    cp public/$cnf.{crt,pem} "$path/all/"
     cp pfx/$cnf.pfx "$path/all/"
     cp pfx/$cnf-single.pfx "$path/all/"
     
@@ -635,6 +690,67 @@ function clean {
 }
 
 ###################### Main #########################
+
+# Read arguments
+while getopts ":c:C:P:L:O:U:E:R:S:N:A:" opt; do
+  case $opt in
+    c)
+    cmd=$OPTARG
+    ;;
+    C)
+    country=$OPTARG
+    ;;
+    P)
+    province=$OPTARG
+    ;;
+    O)
+    organisation=$OPTARG
+    ;;
+    L)
+    locality=$OPTARG
+    ;;
+    U)
+    unit=$OPTARG
+    ;;
+    E)
+    email=$OPTARG
+    ;;
+    R)
+    url=$OPTARG
+    ;;
+    S)
+    sub=$OPTARG
+    ca=$OPTARG
+    ;;
+    N)
+    cn=$OPTARG
+    ;;
+    A)
+    alt=$OPTARG
+    ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit
+      ;;
+  esac
+done
+
+case $cmd in
+    ca)
+    if [ ! -f template.conf ]; then
+        setup_ca
+    fi
+    exit
+    ;;
+    sub)
+    create_sub_ca
+    exit
+    ;;
+    cert)
+    create_certificate
+    exit
+    ;;
+esac
 
 # Setup the certificate authority if it hasn't been initialised
 if [ ! -f template.conf ]; then
